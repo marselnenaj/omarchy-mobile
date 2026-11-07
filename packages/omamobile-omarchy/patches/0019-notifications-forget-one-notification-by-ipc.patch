@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: MIT
-# Forget4.5keyed live/history record through IPC without sender actions.
-# Skip re-archiving the forgotten toast; malformed/unknown keys do nothing.
-# Never delete arbitrary image paths:4.5doesnotown sender image files.
+# Keyed deletion and live-only sender activation; never execute history actions.
 
-diff --git i/shell/plugins/notifications/Service.qml w/shell/plugins/notifications/Service.qml
---- i/shell/plugins/notifications/Service.qml
-+++ w/shell/plugins/notifications/Service.qml
+--- a/shell/plugins/notifications/Service.qml
++++ b/shell/plugins/notifications/Service.qml
 @@ -826,7 +826,7 @@
      delete heights[key]
      delete fresh[key]
@@ -15,7 +12,7 @@ diff --git i/shell/plugins/notifications/Service.qml w/shell/plugins/notificatio
      layoutRevision += 1
    }
  
-@@ -1218,6 +1218,21 @@
+@@ -1220,6 +1220,35 @@
    }
  
    // A row that closes moves from live to history.
@@ -24,6 +21,7 @@ diff --git i/shell/plugins/notifications/Service.qml w/shell/plugins/notificatio
 +  function forgetNotification(name) {
 +    var key = String(name || "")
 +    if (!Store.KEY.test(key)) return "none"
++    if (!liveLoaded || !historyLoaded) return "busy"
 +    var exists = !!liveKeys[key] || !!Store.liveEntry(liveEntries, key)
 +        || historyEntries.some(function(entry) { return entry.key === key })
 +    if (!exists) return "ok"
@@ -34,15 +32,38 @@ diff --git i/shell/plugins/notifications/Service.qml w/shell/plugins/notificatio
 +    return "ok"
 +  }
 +
++  // Snapshot logical keys before removal. New notifications arriving after
++  // this call have new keys and are never covered by the center's tombstones.
++  function forgetAllNotifications() {
++    if (!liveLoaded || !historyLoaded) return JSON.stringify({ result: "busy", keys: [] })
++    var keys = Object.keys(liveKeys)
++    liveEntries.concat(historyEntries).forEach(function(entry) {
++      if (keys.indexOf(entry.key) < 0) keys.push(entry.key)
++    })
++    keys = keys.filter(function(key) { return Store.KEY.test(key) })
++    for (var i = 0; i < keys.length; i++) forgetNotification(keys[i])
++    return JSON.stringify({ result: "ok", keys: keys })
++  }
++
    function storeClose(key, reason) {
      var entry = Store.liveEntry(liveEntries, key)
      if (!entry) return
-@@ -1428,6 +1443,8 @@
+@@ -1429,6 +1458,18 @@
+     target: "notifications"
  
      function ping(): string { return "ok" }
- 
++
 +    function forget(name: string): string { return service.forgetNotification(name) }
 +
++    function forgetAll(): string { return service.forgetAllNotifications() }
++
++    // Persisted history cannot assert a sender capability: resolve live now.
++    function activateLive(name: string): string {
++      var key = String(name || "")
++      if (!Store.KEY.test(key) || !service.refs[key] || service.rowIndexFor(key) < 0) return "none"
++      service.activate(key)
++      return "ok"
++    }
+ 
      function isDnd(): string { return service.doNotDisturb ? "on" : "off" }
  
-     function toggleDnd(): string {

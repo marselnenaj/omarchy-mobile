@@ -803,6 +803,7 @@ Item {
   // shade has shown (omamobile.bar reads it at start and hears it by IPC).
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omamobile"
   property var notifications: []
+  property string notificationStore: ""
   property double nowMs: Date.now()
   property double seenStamp: 0
   property double seenWritten: 0
@@ -829,7 +830,7 @@ Item {
   function forgetNotification(entry) {
     if (!entry || !entry.key || !entry.file) return false
     var marks = Object.assign({}, hiddenNotifications)
-    marks[entry.key] = Date.now()
+    Object.defineProperty(marks, entry.key, { value: Date.now(), enumerable: true, configurable: true, writable: true })
     hiddenNotifications = marks
     forgetQueue = forgetQueue.concat([{ key: entry.key, file: entry.file }])
     // Later, not now: the row asking is a delegate of this list.
@@ -868,11 +869,17 @@ Item {
 
   Process {
     id: notificationsRead
-    command: ["sh", "-c", "for f in \"$1\"/*.json \"$1\"/history/*.json; do [ -f \"$f\" ] && awk 1 \"$f\"; done; exit 0",
+    command: ["sh", "-c",
+      "if [ -f \"$1/live.json\" ] || [ -f \"$1/history.json\" ]; then "
+      + "printf '%s\\n' '{\"omamobileStore\":\"keyed\"}'; "
+      + "for f in \"$1/live.json\" \"$1/history.json\"; do [ ! -f \"$f\" ] || awk 1 \"$f\" || exit 1; done; "
+      + "else printf '%s\\n' '{\"omamobileStore\":\"legacy\"}'; "
+      + "for f in \"$1\"/*.json \"$1\"/history/*.json; do [ ! -f \"$f\" ] || awk 1 \"$f\" || exit 1; done; fi; exit 0",
               "sh", root.notificationsDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        root.notificationStore = NotificationsModel.storeKind(text)
         var view = NotificationsModel.shown(text, root.hiddenNotifications, Date.now())
         root.hiddenNotifications = view.hidden
         // Only a change replaces the rows: a new list rebuilds every row, and
@@ -931,19 +938,38 @@ Item {
     clearAllNotifications()
   }
 
+  property bool pendingClearKeyed: false
+  property var pendingClearKeys: []
   function clearAllNotifications() {
-    notifications = []
     if (clearProc.running) return
-    clearProc.command = ["sh", "-c",
-      "qs ipc -p \"$1\" call notifications dismissAll; qs ipc -p \"$1\" call notifications clear",
-      "sh", Quickshell.shellDir]
+    if (!notificationStore) { notificationDeleteError = "Notifications are loading"; return }
+    pendingClearKeyed = notificationStore === "keyed"
+    pendingClearKeys = notifications.map(function(entry) { return entry.key })
+    clearProc.command = pendingClearKeyed
+      ? ["qs", "ipc", "-p", Quickshell.shellDir, "call", "notifications", "forgetAll"]
+      : ["sh", "-c", "qs ipc -p \"$1\" call notifications dismissAll && qs ipc -p \"$1\" call notifications clear",
+         "sh", Quickshell.shellDir]
     clearProc.running = true
   }
 
   Process {
     id: clearProc
-    // The service's file queue runs after the IPC answers; read once it has.
-    onExited: notificationsLater.restart()
+    stdout: StdioCollector { id: clearResult; waitForEnd: true }
+    onExited: function(code) {
+      var result = root.pendingClearKeyed
+        ? NotificationsModel.clearResult(clearResult.text, code)
+        : { ok: code === 0, keys: root.pendingClearKeys }
+      root.pendingClearKeys = []
+      if (result.ok) {
+        var marks = Object.assign({}, root.hiddenNotifications)
+        for (var i = 0; i < result.keys.length; i++)
+          Object.defineProperty(marks, result.keys[i], { value: Date.now(), enumerable: true, configurable: true, writable: true })
+        root.hiddenNotifications = marks
+        root.notifications = root.notifications.filter(function(entry) { return result.keys.indexOf(entry.key) < 0 })
+        root.notificationDeleteError = ""
+      } else root.notificationDeleteError = "Couldn't clear notifications"
+      notificationsLater.restart()
+    }
   }
 
   Timer {
@@ -954,11 +980,30 @@ Item {
 
   // A row's tap: the toast's own action, or Omarchy's focus helper for the
   // app that sent it, with the sheet out of the way.
+  property var pendingNotificationTap: null
   function openNotification(entry) {
-    var argv = NotificationsModel.tapArgv(entry)
-    if (!argv) return
+    if (!entry || notificationTap.running) return
     root.dismiss()
-    Quickshell.execDetached(argv)
+    if (!entry.keyed || !entry.live) {
+      var argv = NotificationsModel.tapArgv(entry)
+      if (argv) Quickshell.execDetached(argv)
+      return
+    }
+    pendingNotificationTap = entry
+    notificationTap.command = ["qs", "ipc", "-p", Quickshell.shellDir, "call", "notifications", "activateLive", entry.key]
+    notificationTap.running = true
+  }
+  Process {
+    id: notificationTap
+    stdout: StdioCollector { id: notificationTapResult; waitForEnd: true }
+    onExited: function(code) {
+      var entry = root.pendingNotificationTap
+      root.pendingNotificationTap = null
+      if (code !== 0 || String(notificationTapResult.text || "").trim() !== "ok") {
+        var argv = NotificationsModel.tapArgv(entry)
+        if (argv) Quickshell.execDetached(argv)
+      }
+    }
   }
 
   // ---------------------------------------------------------------- media

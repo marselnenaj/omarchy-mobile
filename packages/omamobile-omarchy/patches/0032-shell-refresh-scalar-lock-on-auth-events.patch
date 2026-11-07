@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: MIT
+# Refresh scalar lock state after real cold-boot unlock notifications.
+
+--- a/shell/services/AuthServiceStore.js
++++ b/shell/services/AuthServiceStore.js
+@@ -5,18 +5,47 @@
+ 
+ var services = ({})
+ var trustedIds = ({})
++var lockObservers = ({})
++
++function disconnectLockObserver(key) {
++  var observers = lockObservers[key] || []
++  for (var i = 0; i < observers.length; i++) {
++    try { observers[i].signal.disconnect(observers[i].callback) } catch (error) {}
++  }
++  delete lockObservers[key]
++}
++
++// Keep signal connections inside this component-private store. Only the host's
++// revision callback crosses this boundary, never the authentication QObject.
++function observeLockChanges(key, service, changed) {
++  if (typeof changed !== "function" || typeof service.currentlyLocked !== "function") return
++  var observers = []
++  var names = ["lockedChanged", "lockRequestedChanged"]
++  for (var i = 0; i < names.length; i++) {
++    try {
++      var signal = service[names[i]]
++      if (signal && typeof signal.connect === "function") {
++        signal.connect(changed)
++        observers.push({ signal: signal, callback: changed })
++      }
++    } catch (error) {}
++  }
++  lockObservers[key] = observers
++}
+ 
+ function has(id) {
+   return services[String(id || "")] !== undefined
+ }
+ 
+-function put(id, service) {
++function put(id, service, changed) {
+   var key = String(id || "")
+   if (!key || !service) return
++  disconnectLockObserver(key)
+   trustedIds[key] = true
+   if (services[key] && services[key] !== service && typeof services[key].destroy === "function")
+     services[key].destroy()
+   services[key] = service
++  observeLockChanges(key, service, changed)
+ }
+ 
+ function isTrusted(id) {
+@@ -34,6 +63,7 @@
+ 
+ function destroy(id) {
+   var key = String(id || "")
++  disconnectLockObserver(key)
+   var service = services[key]
+   if (service && typeof service.destroy === "function") service.destroy()
+   delete services[key]
+--- a/shell/shell.qml
++++ b/shell/shell.qml
+@@ -965,7 +965,7 @@
+         // Never publish lock/polkit through ShellRoot._services. The private JS
+         // import retains their lifetime without adding a traversable property
+         // or QObject parent back to the host shell.
+-        AuthServiceStore.put(key, inst); shell._authenticationRevision++
++        AuthServiceStore.put(key, inst, function() { shell._authenticationRevision++ }); shell._authenticationRevision++
+       } else {
+         var snext = ({})
+         for (var sk in _services) snext[sk] = _services[sk]

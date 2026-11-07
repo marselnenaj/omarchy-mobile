@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 
 def actual(t, ex, version, make_root, run, ok, read, series, package, parse_qml):
@@ -35,6 +36,9 @@ def actual(t, ex, version, make_root, run, ok, read, series, package, parse_qml)
     ok(len(status['applied']) == count and not status['upstream'],
        'real4.5: every shipped runtime patch applied')
     ok(status['series'].endswith('/patches'), 'real4.5: selects the 4.5 family')
+    ok('function lockSnapshot()' in read(root, auth)
+       and 'function observeLockChanges(' in read(root, auth),
+       'real4.5: internal store exposes scalar snapshots and canonical event updates')
     ok(policy_fixture.read_text() == sentinel, 'real4.5: external policy fixture untouched')
     ok('omamobile-update' in read(root, 'usr/bin/omarchy-update'),
        'real4.5: packaged absolute bin symlink routes updater handoff correctly')
@@ -70,6 +74,7 @@ def actual(t, ex, version, make_root, run, ok, read, series, package, parse_qml)
     node_tests = [
         ('upstream45/notifications/logic.cjs', [], 'actual notification functions'),
         ('notification-store45.cjs', [env['OMARCHY_SHELL_DIR']], 'keyed store and lock-glance compatibility'),
+        ('scalar-lock45.cjs', [env['OMARCHY_SHELL_DIR']], 'scalar API isolates credentials and fails closed'),
     ]
     for script, arguments, label in node_tests:
         if not node:
@@ -80,6 +85,22 @@ def actual(t, ex, version, make_root, run, ok, read, series, package, parse_qml)
             env=env, capture_output=True, text=True,
         )
         ok(result.returncode == 0, f'real4.5: {label}')
+        if result.returncode:
+            print(result.stdout + result.stderr)
+
+    native_runner = shutil.which('qmltestrunner6') or (
+        '/usr/lib/qt6/bin/qmltestrunner'
+        if os.path.isfile('/usr/lib/qt6/bin/qmltestrunner') else None
+    )
+    if not native_runner:
+        print('ok - real4.5: native scalar host factory # SKIP no qmltestrunner')
+    else:
+        result = subprocess.run(
+            [sys.executable, os.path.join(package, 'test/scalar-lock-native.py'),
+             env['OMARCHY_SHELL_DIR']], env=env, capture_output=True, text=True,
+        )
+        ok(result.returncode == 0,
+           'real4.5: actual host factory async unlock passes; previous0032 negative fails')
         if result.returncode:
             print(result.stdout + result.stderr)
 

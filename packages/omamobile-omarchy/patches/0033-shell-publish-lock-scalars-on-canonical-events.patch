@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: MIT
+# Publish scalar lock snapshots imperatively on trusted native-event diagnostics.
+
+--- a/shell/shell.qml
++++ b/shell/shell.qml
+@@ -462,11 +462,22 @@
+     return copy
+   }
+ 
++  // Publish only detached scalar values. Never depend on a JS-store method
++  // or an otherwise unused revision read being a QML binding dependency.
++  function refreshAuthenticationState() {
++    _authenticationRevision++
++    var snapshot = AuthServiceStore.lockSnapshot()
++    for (var key in _pluginBarStateApis) {
++      var api = _pluginBarStateApis[key]
++      if (api) api._sessionLockState = { known: snapshot.known === true, locked: snapshot.locked !== false }
++    }
++  }
++
+   function pluginBarStateFor(cacheKey, pluginId) {
+     if (_pluginBarStateApis[cacheKey]) return _pluginBarStateApis[cacheKey]
+     var api = pluginBarStateApiComponent.createObject(null, { ownerPluginId: pluginId })
+     if (!api) return null
+-    api._sessionLockState = Qt.binding(function() { var revision = shell._authenticationRevision; return AuthServiceStore.lockSnapshot() })
++    api._sessionLockState = AuthServiceStore.lockSnapshot()
+     api.barHidden = Qt.binding(function() { return shell.bar ? shell.bar.barHidden === true : false })
+     api.barSize = Qt.binding(function() { return shell.bar ? Math.max(0, shell.bar.barSize || 0) : 0 })
+     api.barSizes = Qt.binding(function() { return shell.bar ? shell.detachedBarSizes(shell.bar.screenBarSizes) : ({}) })
+@@ -965,7 +976,7 @@
+         // Never publish lock/polkit through ShellRoot._services. The private JS
+         // import retains their lifetime without adding a traversable property
+         // or QObject parent back to the host shell.
+-        AuthServiceStore.put(key, inst, function() { shell._authenticationRevision++ }); shell._authenticationRevision++
++        AuthServiceStore.put(key, inst, function() { shell.refreshAuthenticationState() }); shell.refreshAuthenticationState()
+       } else {
+         var snext = ({})
+         for (var sk in _services) snext[sk] = _services[sk]
+@@ -1016,7 +1027,7 @@
+         }
+         // A service that loses its trusted authentication capability can move
+         // back to the ordinary service map only after the isolated copy dies.
+-        AuthServiceStore.destroy(id); shell._authenticationRevision++
++        AuthServiceStore.destroy(id); shell.refreshAuthenticationState()
+       }
+       ensureService(id)
+     }
+@@ -1048,7 +1059,7 @@
+         && authenticationManifest.entryPoints.service
+       if (stillAuthenticationService && pluginRegistry.isEnabled(authenticationId)
+           && shell.isAuthenticationService(authenticationManifest, authenticationId)) continue
+-      AuthServiceStore.destroy(authenticationId); shell._authenticationRevision++
++      AuthServiceStore.destroy(authenticationId); shell.refreshAuthenticationState()
+     }
+   }
+ 
+@@ -1077,7 +1088,7 @@
+       var authenticationId = authenticationIds[ai]
+       if (!serviceKeepLoaded(authenticationId)) {
+         AuthServiceStore.destroy(authenticationId)
+-        shell._authenticationRevision++
++        shell.refreshAuthenticationState()
+       }
+     }
+   }
+--- a/shell/services/AuthServiceStore.js
++++ b/shell/services/AuthServiceStore.js
+@@ -20,7 +20,9 @@
+ function observeLockChanges(key, service, changed) {
+   if (typeof changed !== "function" || typeof service.currentlyLocked !== "function") return
+   var observers = []
+-  var names = ["lockedChanged", "lockRequestedChanged"]
++  // The trusted lock already emits lastEventChanged for native lock/secure
++  // transitions even when its aggregate readonly locked binding is stale.
++  var names = ["lockedChanged", "lockRequestedChanged", "lastEventChanged"]
+   for (var i = 0; i < names.length; i++) {
+     try {
+       var signal = service[names[i]]

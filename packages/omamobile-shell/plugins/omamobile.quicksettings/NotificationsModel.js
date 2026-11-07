@@ -4,15 +4,11 @@
 // Pure functions, so QuickSettings.qml can render plain objects and Node can
 // test them in test/notifications-model.js through module.exports.
 //
-// Omarchy's service (shell/plugins/notifications/Service.qml) writes one
-// single-line JSON file per notification: in ~/.local/state/omarchy/
-// notifications/ while its toast is on screen, then moved into history/
-// when it expires, is dismissed or is acted on, trimmed to the newest ten.
-// "This directory IS the history", as the service says; its IPC can replay
-// it as toasts (showHistory) but has no call that returns it. Each file is
-// named <timestamp>-<id>.json, the timestamp in milliseconds since the epoch.
-// One notification is taken away by that name through the service's forget
-// call (omamobile-omarchy patch 0019), never by deleting the file here.
+// Omarchy4.5 stores keyed arrays in live.json and history.json. Live includes
+// a heads-up that has hidden while its sender/payload is still alive; history
+// has closed_ts and cannot assert a live sender action. Read both atomically
+// written files, deduplicate by logical key, and forget through service IPC.
+// The legacy single-row shape remains readable for an older stored entry.
 
 var LIMIT = 10
 
@@ -49,16 +45,29 @@ function execArgv(value) {
   return list
 }
 
+// Reader emits this prefix independently of payload rows. Presence of either
+// keyed store prevents fallback to leftover legacy files, even for empty arrays.
+function storeKind(raw) {
+  var first = str(raw).split("\n")[0]
+  try {
+    var mode = JSON.parse(first).omamobileStore
+    return mode === "keyed" || mode === "legacy" ? mode : ""
+  } catch (error) { return "" }
+}
+
 function entry(value) {
   var v = value || {}
-  var timestamp = Number(v.timestamp || 0)
+  var keyed = typeof v.key === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(v.key)
+  var timestamp = Number(keyed ? Number(v.ts || 0) * 1000 : v.timestamp || 0)
   if (!isFinite(timestamp) || timestamp < 0) timestamp = 0
   var id = v.originalId || v.id || 0
   return {
-    key: String(timestamp) + "-" + String(id),
+    key: keyed ? str(v.key) : String(timestamp) + "-" + String(id),
+    keyed: keyed,
+    live: keyed && !v.closed_ts,
     // The service's own name for the file (popupFileName: <timestamp>-
     // <originalId>.json), which its forget call takes.
-    file: String(timestamp) + "-" + String(Number(v.originalId) || 0) + ".json",
+    file: keyed ? str(v.key) : String(timestamp) + "-" + String(Number(v.originalId) || 0) + ".json",
     app: str(v.app),
     summary: str(v.summary).trim(),
     body: plainBody(v.body),
@@ -69,26 +78,32 @@ function entry(value) {
   }
 }
 
-// The concatenation of every history and on-screen file (`awk 1` over both
-// directories), newest first, each notification once (a toast moving into
-// history can be read in both places), at most `limit`. Torn lines from a
-// crash mid-write are skipped, as Omarchy skips them.
+// Both keyed state arrays, newest first and deduplicated by logical key.
+// A row moving between atomic files can be observed twice; prefer live input.
+// Malformed or partially read lines are ignored.
 function parse(raw, limit) {
   var max = typeof limit === "number" ? Math.max(0, limit) : LIMIT
   var lines = str(raw).split("\n")
-  var seen = {}
+  var seen = Object.create(null)
   var out = []
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim()
     if (!line) continue
     var value = null
     try { value = JSON.parse(line) } catch (error) { continue }
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue
-    var e = entry(value)
-    if (!e.summary && !e.body) continue
-    if (seen[e.key]) continue
-    seen[e.key] = true
-    out.push(e)
+    if (!value || typeof value !== "object") continue
+    var values = Array.isArray(value) ? value : [value]
+    for (var j = 0; j < values.length; j++) {
+      if (!values[j] || typeof values[j] !== "object" || Array.isArray(values[j])) continue
+      if ((Array.isArray(value) || values[j].key !== undefined)
+          && (typeof values[j].key !== "string"
+            || !/^[A-Za-z0-9_-]{1,120}$/.test(values[j].key))) continue
+      var e = entry(values[j])
+      if (!e.summary && !e.body) continue
+      if (seen[e.key]) continue
+      seen[e.key] = true
+      out.push(e)
+    }
   }
   out.sort(function(a, b) { return b.timestamp - a.timestamp })
   return out.slice(0, max)
@@ -105,14 +120,15 @@ function shown(raw, hidden, now, graceMs) {
   var marks = hidden || {}
   var grace = typeof graceMs === "number" ? graceMs : 15000
   var all = parse(raw, Infinity)
-  var present = {}
+  var present = Object.create(null)
   for (var i = 0; i < all.length; i++) present[all[i].key] = true
   var kept = {}
   for (var key in marks) {
-    if (!marks.hasOwnProperty(key) || !present[key]) continue
-    if (Number(now) - Number(marks[key]) <= grace) kept[key] = marks[key]
+    if (!Object.prototype.hasOwnProperty.call(marks, key) || !present[key]) continue
+    if (Number(now) - Number(marks[key]) <= grace)
+      Object.defineProperty(kept, key, { value: marks[key], enumerable: true, configurable: true, writable: true })
   }
-  var out = all.filter(function(e) { return !kept.hasOwnProperty(e.key) })
+  var out = all.filter(function(e) { return !Object.prototype.hasOwnProperty.call(kept, e.key) })
   return { entries: out.slice(0, LIMIT), hidden: kept }
 }
 
@@ -146,6 +162,8 @@ function newest(entries) {
 // toast without a live action does). Null when there is nothing to do.
 function tapArgv(e) {
   if (!e) return null
+  // A persisted keyed row cannot assert a live sender capability.
+  if (e.keyed) return e.app ? ["omarchy-hyprland-focus-app", e.app] : null
   var argv = execArgv(e.execArgv)
   if (argv) return argv
   if (e.app) return ["omarchy-hyprland-focus-app", e.app]
@@ -168,9 +186,28 @@ function title(count) {
   return count > 0 ? "Notifications · " + count : "Notifications"
 }
 
+// Only service-acknowledged keys are hidden while its atomic file writes finish.
+// A failed/unknown reply keeps the center visible; no masked shell exit code.
+function clearResult(raw, code) {
+  if (code !== 0) return { ok: false, keys: [] }
+  var value
+  try { value = JSON.parse(String(raw || "")) } catch (error) { return { ok: false, keys: [] } }
+  if (!value || value.result !== "ok" || !Array.isArray(value.keys) || value.keys.length > 300)
+    return { ok: false, keys: [] }
+  var seen = Object.create(null), keys = []
+  for (var i = 0; i < value.keys.length; i++) {
+    var key = value.keys[i]
+    if (typeof key !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(key)) return { ok: false, keys: [] }
+    if (!seen[key]) { seen[key] = true; keys.push(key) }
+  }
+  return { ok: true, keys: keys }
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     LIMIT: LIMIT,
+    storeKind: storeKind,
+    clearResult: clearResult,
     plainBody: plainBody,
     execArgv: execArgv,
     entry: entry,

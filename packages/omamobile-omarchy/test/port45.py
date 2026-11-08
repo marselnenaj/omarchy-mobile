@@ -93,6 +93,20 @@ def actual(t, ex, version, make_root, run, ok, read, series, package, parse_qml)
         if result.returncode:
             print(result.stdout + result.stderr)
 
+    # Exercise the exact applied Toast gesture, animations and click handler.
+    qt_runner = shutil.which('qmltestrunner') or '/usr/lib/qt6/bin/qmltestrunner'
+    if Path(qt_runner).is_file():
+        result = subprocess.run(
+            [sys.executable, os.path.join(package, 'test', 'toast-swipe45.py'),
+             os.path.join(root, notifications + 'Toast.qml')],
+            capture_output=True, text=True,
+        )
+        ok(result.returncode == 0, 'real4.5: actual Toast touch dismissal animations')
+        if result.returncode:
+            print(result.stdout + result.stderr)
+    else:
+        print('ok - real4.5: Toast gesture tests # SKIP no Qt qmltestrunner')
+
     # Refuse externally changed package files instead of overwriting them.
     lock_service = Path(root) / (lock + 'Service.qml')
     patched = lock_service.read_text()

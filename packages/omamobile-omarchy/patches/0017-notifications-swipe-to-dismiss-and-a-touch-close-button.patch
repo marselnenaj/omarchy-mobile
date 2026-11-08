@@ -1,51 +1,114 @@
 # SPDX-License-Identifier: MIT
-# Notifications: swipe to dismiss, and a close button on touch screens. On a
-# touch screen a tap runs the toast's default action and there is no right
-# button, so a toast could only be got rid of by letting it launch something,
-# and a critical one (Omarchy's first-run invitations) never expires. A
-# sideways swipe now moves the card with the finger: let go past 35% of its
-# width, or flick it, and it flies off that side and closes as a right-click
-# does; short of that it springs back. The drag starts only past a threshold,
-# so a tap still runs the default action, and it is off while a reply is
-# being typed. When Hyprland lists a touch screen, each toast also gets a
-# close glyph with a 44 px target in its top-right corner; a seat with only a
-# mouse shows none, so desktops look as before. Hover pauses the countdown
-# for a mouse or stylus only (a finger doesn't hover), and a card being
-# swiped doesn't expire under the finger. Right-click still closes.
-#
-# Against Omarchy 4.0.6 (edge 4.0.6-1) with 0015 (inline reply) applied.
-#
-# Omarchy 4.5: Use the Toast scene's independent horizontal translation and a persistent
-# 40 px close target. Preserve mouse actions and disable dragging during reply.
+# Restore touch fly-off, flick and spring-back in the 4.5 scene toast.
+# Reported by jkjoplin while testing #471 on cheetah.
+# Preserve the keyed scene opacity and existing dismissal signal contract.
 
-diff --git i/shell/plugins/notifications/Toast.qml w/shell/plugins/notifications/Toast.qml
---- i/shell/plugins/notifications/Toast.qml
-+++ w/shell/plugins/notifications/Toast.qml
-@@ -28,6 +28,23 @@
+diff --git a/shell/plugins/notifications/Toast.qml b/shell/plugins/notifications/Toast.qml
+--- a/shell/plugins/notifications/Toast.qml
++++ b/shell/plugins/notifications/Toast.qml
+@@ -28,6 +28,93 @@
    property real cardWidth: Style.space(380)
    property string replyPlaceholder: ""
    property bool replyOpen: false
 +  property real swipeOffset: 0
++  property real swipeVelocity: 0
++  property bool dismissing: false
 +  transform: Translate { x: card.swipeOffset }
++
++  // Keep the proven touch interaction from the legacy card: follow the
++  // finger directly, then fly off or spring back after release.
++  function cancelSwipe() {
++    swipeAnimation.stop()
++    swipeResetTimer.stop()
++    card.dismissing = false
++    card.swipeOffset = 0
++    card.swipeVelocity = 0
++  }
++
++  function finishSwipe() {
++    if (card.replyOpen || card.place.hidden || card.place.leaving) {
++      card.cancelSwipe()
++      return
++    }
++    var distance = Math.abs(card.swipeOffset)
++    var sameWay = card.swipeVelocity * card.swipeOffset > 0
++    var flung = sameWay && Math.abs(card.swipeVelocity) >= Style.space(900)
++        && distance >= card.width * 0.1
++    swipeAnimation.dismiss = card.width > 0 && (distance >= card.width * 0.35 || flung)
++    if (swipeAnimation.dismiss) {
++      card.dismissing = true
++      swipeAnimation.to = (card.swipeOffset < 0 ? -1 : 1) * (card.width + Style.space(24))
++    } else {
++      swipeAnimation.to = 0
++    }
++    swipeAnimation.restart()
++  }
++
 +  DragHandler {
++    id: swipeHandler
 +    target: null
-+    enabled: !card.replyOpen && !card.place.hidden && !card.place.leaving
++    enabled: !card.replyOpen && !card.place.hidden && !card.place.leaving && !card.dismissing
 +    acceptedDevices: PointerDevice.TouchScreen
++    dragThreshold: Style.space(12)
++    onCanceled: card.cancelSwipe()
 +    xAxis.enabled: true
 +    yAxis.enabled: false
-+    onActiveTranslationChanged: if (active) card.swipeOffset = activeTranslation.x
 +    onActiveChanged: {
-+      if (!active) {
-+        var dismiss = Math.abs(card.swipeOffset) >= Math.min(Style.space(90), card.width * 0.25)
-+        card.swipeOffset = 0
-+        if (dismiss) card.dismissed()
++      if (active) {
++        swipeAnimation.stop()
++        card.swipeVelocity = 0
++      } else {
++        card.finishSwipe()
 +      }
++    }
++    onActiveTranslationChanged: {
++      if (!active) return
++      card.swipeOffset = activeTranslation.x
++      card.swipeVelocity = centroid.velocity.x
++    }
++  }
++
++  SequentialAnimation {
++    id: swipeAnimation
++    property real to: 0
++    property bool dismiss: false
++    NumberAnimation {
++      target: card
++      property: "swipeOffset"
++      to: swipeAnimation.to
++      duration: swipeAnimation.dismiss ? 140 : 200
++      easing.type: swipeAnimation.dismiss ? Easing.InQuad : Easing.OutBack
++    }
++    ScriptAction {
++      script: {
++        if (!swipeAnimation.dismiss) return
++        card.dismissed()
++        // A container retaining the toast gets a usable card back.
++        swipeResetTimer.restart()
++      }
++    }
++  }
++
++  Timer {
++    id: swipeResetTimer
++    interval: 400
++    onTriggered: {
++      card.dismissing = false
++      card.swipeOffset = 0
 +    }
 +  }
    signal replyRequested()
    signal replyCancelled()
    signal replySent(string text)
-@@ -454,7 +471,7 @@
+@@ -216,6 +303,7 @@
+   z: place.z
+   scale: scene ? scene.at(row.key, "scale") : 1
+   opacity: place.hidden ? 0 : (scene ? scene.at(row.key, "opacity") : 1)
++      * (1 - 0.6 * Math.min(1, Math.abs(card.swipeOffset) / Math.max(1, card.width)))
+   transformOrigin: Item.Top
+
+   // `visible` is deliberately unbound: anything derived from layout output
+@@ -454,7 +542,7 @@
                  anchors.centerIn: parent
                  text: card.ago()
                  color: card.dimColor
@@ -54,7 +117,7 @@ diff --git i/shell/plugins/notifications/Toast.qml w/shell/plugins/notifications
                  visible: opacity > 0.01
                  font.family: Style.font.family
                  font.pixelSize: Style.font.bodySmall
-@@ -465,10 +482,10 @@
+@@ -465,10 +553,10 @@
                  id: shut
                  anchors.right: parent.right
                  anchors.verticalCenter: parent.verticalCenter

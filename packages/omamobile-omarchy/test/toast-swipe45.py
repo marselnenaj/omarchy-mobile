@@ -40,7 +40,11 @@ def main():
         (fixture / 'Style.qml').write_text('''// SPDX-License-Identifier: MIT
 pragma Singleton
 import QtQuick
-QtObject { function space(value) { return value } }
+QtObject {
+    property bool reduceMotion: false
+    function space(value) { return value }
+    function duration(value) { return reduceMotion ? 0 : value }
+}
 ''')
         (fixture / 'qmldir').write_text('singleton Style 1.0 Style.qml\n')
         (fixture / 'Card.qml').write_text('''// SPDX-License-Identifier: MIT

@@ -21,6 +21,7 @@ TestCase {
     SignalSpy { id: actionSpy; signalName: "activated" }
 
     function init() {
+        Style.reduceMotion = false
         card = createTemporaryObject(factory, test)
         verify(card !== null)
         dismissSpy.target = card
@@ -158,6 +159,21 @@ TestCase {
         compare(card.swipeOffset, 0)
         compare(card.dismissing, false)
         compare(dismissSpy.count, 0)
+    }
+
+    function test_reduceMotion_data() {
+        return [ { tag: "dismiss", offset: 150 }, { tag: "return", offset: 55 } ]
+    }
+
+    function test_reduceMotion(data) {
+        Style.reduceMotion = true
+        card.swipeOffset = data.offset
+        card.swipeVelocity = 0
+        card.finishSwipe()
+        var dismiss = data.offset >= card.width * 0.35
+        tryCompare(card, "swipeOffset", dismiss ? card.width + 24 : 0, 80)
+        compare(dismissSpy.count, dismiss ? 1 : 0)
+        compare(actionSpy.count, 0)
     }
 
     function test_sceneOpacity() {

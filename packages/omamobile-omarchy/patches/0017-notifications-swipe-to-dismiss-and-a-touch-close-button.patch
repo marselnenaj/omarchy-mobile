@@ -76,7 +76,7 @@ diff --git a/shell/plugins/notifications/Toast.qml b/shell/plugins/notifications
 +      target: card
 +      property: "swipeOffset"
 +      to: swipeAnimation.to
-+      duration: swipeAnimation.dismiss ? 140 : 200
++      duration: Style.duration(swipeAnimation.dismiss ? 140 : 200)
 +      easing.type: swipeAnimation.dismiss ? Easing.InQuad : Easing.OutBack
 +    }
 +    ScriptAction {
